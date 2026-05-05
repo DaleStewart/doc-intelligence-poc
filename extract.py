@@ -99,13 +99,31 @@ from typing import Any, Iterable
 # below are tuned for letter-size US government forms scanned around 200 dpi.
 # Adjust these if you process forms with much tighter or looser line spacing.
 
-_ROW_Y_TOLERANCE = 0.10      # vertical "same row" threshold for mark<->word matching
+_ROW_Y_TOLERANCE = 0.18      # vertical "same row" threshold for mark<->word matching.
+                             #   Set just under typical form line height (~0.20–0.30 in)
+                             #   so a mark whose center sits slightly above or below its
+                             #   label baseline still binds, while marks one full row
+                             #   away are still excluded.
 _MAX_MARK_TO_WORD = 1.0      # max horizontal distance from a mark to its Yes/No anchor
 _MIN_MARK_CONFIDENCE = 0.5   # below this, a mark is treated as a printed template outline
                              #   (not an actual user check). Empirically the OCR returns
                              #   ~0.10 confidence for blank checkboxes and ~0.95+ for
                              #   real ink marks, so 0.5 cleanly separates them.
 _PAIR_MAX_X_GAP = 1.5        # max gap between a Yes and its paired No on the same row
+_TIGHT_PAIR_GAP = 0.45       # when Yes and No are closer than this horizontally, the
+                             #   bracketing rule below breaks down (the mark can sit on
+                             #   either side of either word). In that case fall back to
+                             #   pure nearest-center assignment, which is geometrically
+                             #   more correct for tight inline "Yes No" pairs.
+                             #   Threshold tuned so the "Yes ___ No ___" underline-blank
+                             #   pattern (gap ~0.65"+) still uses bracketing, while the
+                             #   "☐Yes ☐No" no-blank pattern (gap <0.45") uses nearest.
+_LABEL_ROW_Y_TOLERANCE = 0.10  # tighter row tolerance for standalone-checkbox label
+                             #   lookup. The wider _ROW_Y_TOLERANCE used for Yes/No
+                             #   anchor matching can pull in labels from the row above
+                             #   or below when standalone option rows are stacked
+                             #   tightly (typical for ADA "check all that apply"
+                             #   lists). Keep the standalone label search snug.
 _MAX_LABEL_X_GAP = 1.5       # standalone checkbox: max gap from the mark to its label
 _MIN_OPTION_CHARS = 2        # drop standalone option labels shorter than this
 _MIN_OPTION_ALPHA = 2        # drop standalone options with fewer letters than this
@@ -413,19 +431,27 @@ def extract_checkbox_answers(analyze_result: dict) -> tuple[list[dict], set[int]
                     continue  # different row
 
                 if yw and nw:
-                    # Both Yes and No present: use horizontal bracketing.
-                    # The 0.05 fudge factor handles marks that sit *exactly*
-                    # on top of the label rather than slightly to its right.
                     yes_x, no_x = yw["cx"], nw["cx"]
-                    if mx >= no_x - 0.05:
+                    if (no_x - yes_x) < _TIGHT_PAIR_GAP:
+                        # Tight inline pair (e.g. "☐Yes ☐No"): the mark can sit
+                        # on either side of either word, so bracketing is
+                        # unreliable. Use pure nearest-center instead.
+                        if abs(mx - yes_x) <= abs(mx - no_x):
+                            target, anchor_x = "yes", yes_x
+                        else:
+                            target, anchor_x = "no", no_x
+                    elif mx >= no_x - 0.05:
+                        # Wide pair, mark right of (or under) "No" —> No.
+                        # The 0.05 fudge factor handles marks that sit *exactly*
+                        # on top of the label rather than slightly to its right.
                         target = "no"
                         anchor_x = no_x
                     elif mx >= yes_x - 0.05:
+                        # Wide pair, mark between Yes and No —> Yes.
                         target = "yes"
                         anchor_x = yes_x
                     else:
-                        # Mark sits to the left of "Yes" — unusual, but
-                        # assign by simple nearest-neighbor.
+                        # Wide pair, mark left of "Yes" — assign by nearest.
                         if abs(mx - yes_x) < abs(mx - no_x):
                             target, anchor_x = "yes", yes_x
                         else:
@@ -544,7 +570,7 @@ def extract_standalone_checkboxes(
                 if not poly:
                     continue
                 lx, ly = _poly_center(poly)
-                if abs(ly - my) > _ROW_Y_TOLERANCE:
+                if abs(ly - my) > _LABEL_ROW_Y_TOLERANCE:
                     continue
                 left_x = min(poly[0::2])
                 gap = left_x - mark_right
@@ -560,7 +586,7 @@ def extract_standalone_checkboxes(
                     if not poly:
                         continue
                     _, ly = _poly_center(poly)
-                    if abs(ly - my) <= _ROW_Y_TOLERANCE:
+                    if abs(ly - my) <= _LABEL_ROW_Y_TOLERANCE:
                         best_line = line
                         break
 
@@ -606,15 +632,35 @@ def _clean_question(text: str) -> str:
     )
     # Normalize whitespace runs to single spaces.
     cleaned = " ".join(cleaned.split())
-    # Drop trailing " Yes ... If" / " Yes ... No" boilerplate — only when
+    # Drop trailing " Yes ... If" / " No ... If" boilerplate — only when
     # there's enough text *before* the marker to keep the question intact.
+    # Try " yes" first because it appears earlier in the typical "Yes ___ No ___"
+    # layout; fall back to " no" for questions where only "No" survived OCR.
+    # All markers require a trailing delimiter so we don't accidentally trim
+    # inside common English words like "not", "now", "year", "yesterday".
     lower = cleaned.lower()
     for marker in (" yes ", " yes,", " yes:"):
         idx = lower.rfind(marker)
         if idx > 20:
             cleaned = cleaned[:idx]
             break
-    return cleaned.strip().rstrip("?:.,").strip()
+    else:
+        for marker in (" no ", " no,", " no:"):
+            idx = lower.rfind(marker)
+            if idx > 20:
+                cleaned = cleaned[:idx]
+                break
+
+    # Final cleanup: a trailing standalone "Yes" or "No" with no following
+    # text never reached the markers above (they all require a delimiter).
+    # Strip it now if the text is long enough that we still have a question
+    # left over after removal.
+    cleaned = cleaned.strip().rstrip("?:.,").strip()
+    for tail in (" yes", " no"):
+        if len(cleaned) > 20 and cleaned.lower().endswith(tail):
+            cleaned = cleaned[: -len(tail)].rstrip("?:.,").strip()
+            break
+    return cleaned
 
 
 # ---------------------------------------------------------------------------

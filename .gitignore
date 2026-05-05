@@ -42,6 +42,7 @@ extract*.json
 read*.json
 *-compactjson.json
 docintelsample*.json
+raw-sample1.json
 
 # ---------------------------------------------------------------------------
 # Editors / OS
