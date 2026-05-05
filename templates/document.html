@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Document Intelligence Demo</title>
+    <style>
+      :root {
+        --bg: #0f172a;
+        --bg-accent: #1f2937;
+        --panel: #ffffff;
+        --ink: #0f172a;
+        --muted: #566176;
+        --accent: #0ea5e9;
+        --accent-strong: #0284c7;
+        --surface: #f8fafc;
+        --border: #e2e8f0;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", Arial, sans-serif;
+        background:
+          radial-gradient(1400px 700px at 15% 20%, rgba(14,165,233,.18), transparent 55%),
+          linear-gradient(130deg, var(--bg) 0%, var(--bg-accent) 100%);
+        min-height: 100vh;
+        display: flex; justify-content: center; padding: 40px 24px;
+        color: var(--ink);
+      }
+      .shell { max-width: 1100px; width: 100%; }
+      .card {
+        background: var(--panel); padding: 32px; border-radius: 18px;
+        box-shadow: 0 24px 80px rgba(15,23,42,.25);
+        border: 1px solid rgba(226,232,240,.7);
+      }
+      h1 { margin: 0 0 4px; font-size: 26px; }
+      .subtitle { color: var(--muted); margin: 0 0 22px; font-size: 14px; }
+      form { display: grid; grid-template-columns: 1fr 220px auto; gap: 12px; align-items: end; }
+      label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; }
+      input[type=file], select {
+        width: 100%; padding: 10px 12px; border-radius: 10px;
+        border: 1px solid var(--border); background: var(--surface); font-size: 14px;
+      }
+      button {
+        padding: 10px 22px; border-radius: 10px; border: none;
+        background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+        color: white; font-weight: 600; cursor: pointer;
+        box-shadow: 0 12px 24px rgba(14,165,233,.28);
+      }
+      .error { margin-top: 16px; color: #b42318; font-weight: 600; }
+      .summary {
+        margin-top: 22px;
+        background: #f1f5f9;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 18px;
+      }
+      .summary h2 { margin: 0 0 8px; font-size: 18px; }
+      .summary h3 { margin: 16px 0 6px; font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+      .summary table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      .summary th, .summary td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+      .summary th { background: #e2e8f0; font-weight: 600; }
+      .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-weight: 600; font-size: 12px; }
+      .pill-yes { background: #dcfce7; color: #166534; }
+      .pill-no { background: #fee2e2; color: #991b1b; }
+      .pill-warn { background: #fef3c7; color: #92400e; }
+      .chip { display: inline-block; background: #e0f2fe; color: #075985; padding: 4px 10px; border-radius: 999px; margin: 2px; font-size: 13px; }
+      pre {
+        margin-top: 22px; background: #0b1020; color: #e2e8f0;
+        padding: 18px; border-radius: 12px; max-height: 70vh; overflow: auto;
+        font-size: 12px; line-height: 1.5;
+      }
+      .nav { margin-bottom: 16px; font-size: 13px; }
+      .nav a { color: #38bdf8; text-decoration: none; margin-right: 12px; }
+      @media (max-width: 720px) { form { grid-template-columns: 1fr; } }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <div class="card">
+        <h1>Azure AI Document Intelligence</h1>
+        <p class="subtitle">Upload a PDF and view the raw analyzer JSON.</p>
+
+        <form method="post" enctype="multipart/form-data">
+          <div>
+            <label for="pdf">PDF file</label>
+            <input id="pdf" name="pdf" type="file" accept="application/pdf" required />
+          </div>
+          <div>
+            <label for="model">Model</label>
+            <select id="model" name="model">
+              {% for m in ["prebuilt-layout","prebuilt-read"] %}
+                <option value="{{ m }}" {% if m == model_id %}selected{% endif %}>{{ m }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <button type="submit">Analyze</button>
+        </form>
+
+        {% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+        {% if summary %}
+          <div class="summary">
+            <h2>Human-readable summary</h2>
+            <div style="font-size:12px;color:var(--muted)">
+              Model: <code>{{ summary.model }}</code> · API <code>{{ summary.api_version }}</code> · {{ summary.page_count }} pages
+              {% if summary.languages %} · Languages: {{ summary.languages|join(', ') }}{% endif %}
+            </div>
+
+            <h3>Handwritten values</h3>
+            {% if summary.handwriting %}
+              {% for h in summary.handwriting %}<span class="chip">{{ h }}</span>{% endfor %}
+            {% else %}<em>None detected.</em>{% endif %}
+
+            {% if summary.pages is defined %}
+              {# prebuilt-read summary: per-page text dump #}
+              <h3>Document text by page</h3>
+              {% for p in summary.pages %}
+                <details {% if loop.first %}open{% endif %} style="margin-top:8px;border:1px solid var(--border);border-radius:8px;padding:10px 14px;background:#fff;">
+                  <summary style="cursor:pointer;font-weight:600;">Page {{ p.page }} <span style="color:var(--muted);font-weight:400;">· {{ p.line_count }} lines</span></summary>
+                  <pre style="margin:10px 0 0;background:#f8fafc;color:var(--ink);padding:12px;border-radius:8px;max-height:50vh;overflow:auto;font-size:13px;line-height:1.5;white-space:pre-wrap;">{{ p.content }}</pre>
+                </details>
+              {% endfor %}
+            {% else %}
+              <h3>Yes / No answers</h3>
+              {% if summary.checkboxes %}
+                <table>
+                  <thead><tr><th>Page</th><th>Question</th><th>Answer</th><th>Confidence</th></tr></thead>
+                  <tbody>
+                    {% for c in summary.checkboxes %}
+                      <tr>
+                        <td>{{ c.page }}</td>
+                        <td>{{ c.question }}</td>
+                        <td>
+                          {% if 'both' in c.answer %}<span class="pill pill-warn">{{ c.answer }}</span>
+                          {% elif c.answer == 'yes' %}<span class="pill pill-yes">YES</span>
+                          {% else %}<span class="pill pill-no">NO</span>{% endif %}
+                        </td>
+                        <td>{{ c.confidence }}</td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              {% else %}<em>No selection marks resolved.</em>{% endif %}
+
+              <h3>Checkbox options (selected items)</h3>
+              {% if summary.options %}
+                <table>
+                  <thead><tr><th>Page</th><th>Option</th><th>State</th><th>Confidence</th></tr></thead>
+                  <tbody>
+                    {% for o in summary.options %}
+                      <tr>
+                        <td>{{ o.page }}</td>
+                        <td>{{ o.option }}</td>
+                        <td>
+                          {% if o.selected %}<span class="pill pill-yes">CHECKED</span>
+                          {% else %}<span class="pill pill-no">unchecked</span>{% endif %}
+                        </td>
+                        <td>{{ o.confidence }}</td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              {% else %}<em>No standalone checkboxes detected.</em>{% endif %}
+
+              <h3>Tables</h3>
+              {% if summary.tables %}
+                {% for t in summary.tables %}
+                  <div style="margin-top:10px;font-size:12px;color:var(--muted)">Page {{ t.page }} · {{ t.rows }} rows × {{ t.columns }} cols</div>
+                  {% if t.key_values %}
+                    <table>
+                      <thead><tr><th>Key</th><th>Value</th></tr></thead>
+                      <tbody>
+                        {% for k, v in t.key_values.items() %}
+                          <tr><td>{{ k }}</td><td>{{ v }}</td></tr>
+                        {% endfor %}
+                      </tbody>
+                    </table>
+                  {% else %}
+                    <em>No populated rows.</em>
+                  {% endif %}
+                {% endfor %}
+              {% else %}<em>None.</em>{% endif %}
+            {% endif %}
+          </div>
+        {% endif %}
+
+        {% if result_json %}
+          <h3 style="margin-top:22px;font-size:14px;color:#cbd5f5;letter-spacing:.04em;text-transform:uppercase;">Compact JSON</h3>
+          <pre>{{ result_json }}</pre>
+        {% endif %}
+      </div>
+    </div>
+  </body>
+</html>
