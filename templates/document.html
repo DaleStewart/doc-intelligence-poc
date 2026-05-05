@@ -166,18 +166,64 @@
               <h3>Tables</h3>
               {% if summary.tables %}
                 {% for t in summary.tables %}
-                  <div style="margin-top:10px;font-size:12px;color:var(--muted)">Page {{ t.page }} · {{ t.rows }} rows × {{ t.columns }} cols</div>
-                  {% if t.key_values %}
+                  <div style="margin-top:14px;font-size:12px;color:var(--muted)">Page {{ t.page }} · {{ t.rows }} rows × {{ t.columns }} cols</div>
+
+                  {% if t.row_objects %}
+                    {# Data table: row 0 contained columnHeader cells. #}
                     <table>
-                      <thead><tr><th>Key</th><th>Value</th></tr></thead>
+                      <thead>
+                        <tr>
+                          {% for c in range(t.columns) %}
+                            <th>{{ t.cells[0][c] or ('col' ~ c) }}</th>
+                          {% endfor %}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {% for row in t.row_objects %}
+                          <tr>
+                            {% for c in range(t.columns) %}
+                              {% set hdr = t.cells[0][c] or ('col' ~ c) %}
+                              <td>{{ row.get(hdr, '') }}</td>
+                            {% endfor %}
+                          </tr>
+                        {% endfor %}
+                      </tbody>
+                    </table>
+                  {% elif t.key_values %}
+                    {# Form-layout table: each cell is label + handwritten value. #}
+                    <table>
+                      <thead><tr><th>Label</th><th>Value</th></tr></thead>
                       <tbody>
                         {% for k, v in t.key_values.items() %}
                           <tr><td>{{ k }}</td><td>{{ v }}</td></tr>
                         {% endfor %}
                       </tbody>
                     </table>
+                  {% elif t.fields %}
+                    {# Fallback: per-cell label/value rows when no clean pairs exist. #}
+                    <table>
+                      <thead><tr><th>Cell</th><th>Label (printed)</th><th>Value (handwritten)</th></tr></thead>
+                      <tbody>
+                        {% for f in t.fields %}
+                          <tr>
+                            <td>r{{ f.row }}c{{ f.column }}</td>
+                            <td>{{ f.label }}</td>
+                            <td>{{ f.value }}</td>
+                          </tr>
+                        {% endfor %}
+                      </tbody>
+                    </table>
                   {% else %}
-                    <em>No populated rows.</em>
+                    {# Last resort: raw cell grid. #}
+                    <table>
+                      <tbody>
+                        {% for row in t.cells %}
+                          <tr>
+                            {% for cell in row %}<td>{{ cell }}</td>{% endfor %}
+                          </tr>
+                        {% endfor %}
+                      </tbody>
+                    </table>
                   {% endif %}
                 {% endfor %}
               {% else %}<em>None.</em>{% endif %}

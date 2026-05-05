@@ -39,8 +39,18 @@ LAYOUT OUTPUT SHAPE
       ],
       "tables":       [
         {"page": 3, "rows": 5, "columns": 5,
-         "cells": [[...], ...],
-         "key_values": {"first cell": "rest joined by |"}},
+         "cells": [[...], ...],                 # cleaned 2D text grid
+         "fields": [                            # one entry per non-empty cell
+            {"row": 0, "column": 0,
+             "label": "Client First and Last Name",   # printed text in the cell
+             "value": "James John"},                  # handwritten text in the cell
+            ...
+         ],
+         "key_values": {"Client First and Last Name": "James John", ...},
+                                                # label -> value where both present
+         "row_objects": [                       # only when row 0 = column headers
+            {"Name": "John", "Date of Birth": "01/01/1995", ...},
+         ]},
         ...
       ],
     }
@@ -89,6 +99,7 @@ Documents without checkboxes (letters, contracts, receipts) yield empty
 
 from __future__ import annotations
 
+import re
 from typing import Any, Iterable
 
 # ---------------------------------------------------------------------------
@@ -667,51 +678,244 @@ def _clean_question(text: str) -> str:
 # TABLE SUMMARY
 # ---------------------------------------------------------------------------
 
+# Selection-mark literals that Document Intelligence inlines into cell text.
+# We strip them from the textual representation so they don't pollute labels
+# and values; the dedicated checkbox extractors above still surface them
+# structurally.
+_SELECTION_TOKEN_RE = re.compile(r":(?:un)?selected:")
+
+
+def _normalize_cell_text(text: str) -> str:
+    """Strip inline selection-mark tokens and collapse whitespace.
+
+    Idempotent. Runs on every printed/handwritten fragment we extract so that
+    cell labels and values never contain ``:selected:`` / ``:unselected:``
+    tokens or stray newlines from multi-line OCR output.
+    """
+    if not text:
+        return ""
+    cleaned = _SELECTION_TOKEN_RE.sub(" ", text)
+    return " ".join(cleaned.split())
+
+
+def _handwritten_ranges(analyze_result: dict) -> list[tuple[int, int]]:
+    """Return sorted, merged ``(start, end)`` ranges of handwritten characters.
+
+    Document Intelligence reports handwriting via the top-level ``styles``
+    array; each style with ``isHandwritten=true`` carries one or more spans
+    into the document's flat ``content`` string. Ranges may overlap or be
+    contiguous, so we merge them once here and re-use the merged list for
+    every cell split.
+
+    Returns ``[]`` when there is no handwriting (typewritten/printed-only
+    documents). In that case ``_split_cell_by_handwriting`` cleanly degrades
+    to "everything is printed".
+    """
+    raw: list[tuple[int, int]] = []
+    for style in analyze_result.get("styles", []):
+        if not style.get("isHandwritten"):
+            continue
+        for span in style.get("spans", []):
+            offset = span.get("offset", 0)
+            length = span.get("length", 0)
+            if length > 0:
+                raw.append((offset, offset + length))
+    raw.sort()
+
+    merged: list[tuple[int, int]] = []
+    for start, end in raw:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _split_cell_by_handwriting(
+    full_content: str,
+    cell_spans: list[dict],
+    hw_ranges: list[tuple[int, int]],
+) -> tuple[str, str]:
+    """Split a single cell's text into ``(printed, handwritten)`` halves.
+
+    Intersects each cell span (an offset/length range into ``full_content``)
+    with the merged handwritten ranges, copying out the printed and
+    handwritten substrings separately. Selection-mark tokens are scrubbed
+    from both outputs.
+
+    Why per-cell: a single handwritten "stroke" reported by the OCR can
+    sometimes span what visually look like two separate cells (e.g. the
+    user wrote a street address and a zip code in one continuous gesture).
+    Walking each cell's spans and clipping to ``[gs, ge)`` ensures each
+    cell only claims its own slice of the handwritten range.
+
+    Cells with no spans (blank cells) return ``("", "")``.
+    """
+    # Each cell can have multiple non-contiguous spans into the global content
+    # (e.g. one span per visual line in a multi-line cell). We extract the
+    # printed and handwritten chunks per span, then join across spans with a
+    # single space — otherwise "...call or text" + "Main Telephone Number"
+    # would collapse into "textMain..." once whitespace is normalized.
+    per_span_printed: list[str] = []
+    per_span_hw: list[str] = []
+
+    for sp in cell_spans:
+        gs = sp.get("offset", 0)
+        gl = sp.get("length", 0)
+        if gl <= 0:
+            continue
+        ge = gs + gl
+        printed_parts: list[str] = []
+        hw_parts: list[str] = []
+        cursor = gs
+        for hs, he in hw_ranges:
+            if he <= cursor:
+                continue  # handwritten range entirely before the cursor
+            if hs >= ge:
+                break  # handwritten range entirely past this cell span
+            if hs > cursor:
+                # Printed segment before the next handwritten chunk.
+                printed_parts.append(full_content[cursor:hs])
+            seg_start = max(hs, cursor)
+            seg_end = min(he, ge)
+            if seg_end > seg_start:
+                hw_parts.append(full_content[seg_start:seg_end])
+            cursor = seg_end
+        if cursor < ge:
+            # Trailing printed segment after the last handwritten chunk.
+            printed_parts.append(full_content[cursor:ge])
+
+        if printed_parts:
+            per_span_printed.append("".join(printed_parts))
+        if hw_parts:
+            per_span_hw.append("".join(hw_parts))
+
+    return (
+        _normalize_cell_text(" ".join(per_span_printed)),
+        _normalize_cell_text(" ".join(per_span_hw)),
+    )
+
+
 def summarize_tables(analyze_result: dict) -> list[dict]:
-    """Return every table as a full grid plus a key/value projection.
+    """Return every table as a structured, label/value-aware summary.
 
-    For each table in the document we emit:
-        - `cells`      : 2D array (rowCount × columnCount) of cell strings.
-        - `key_values` : dict mapping each row's first cell to the remaining
-                         cells joined with " | ". Rows with all-blank trailing
-                         cells are skipped, so blank template rows are omitted.
+    Document Intelligence emits tables for two very different document
+    archetypes, and the same downstream JSON has to serve both well:
 
-    The key/value view is what most consumers actually want for forms:
-        "Client Name"  ->  "Jane Doe"
-        "DOB"          ->  "01/01/2000"
-        "Cash"         ->  "$ 100 | HOUSE"
+    1. **Form-layout tables** (e.g. SNAP/government intake forms): each
+       cell holds a printed *label* immediately followed by a handwritten
+       *value* the applicant filled in ("Date of Birth 09/10/1995"). The
+       table's row/column structure is just visual layout — there is no
+       header row.
+    2. **True data tables** (e.g. household member rosters, invoice line
+       items): row 0 is a printed header row (Document Intelligence flags
+       these cells with ``kind="columnHeader"``) and subsequent rows hold
+       per-record data, often handwritten.
 
-    Works on any table the OCR detects — invoices, line-item tables, resource
-    grids, data dictionaries.
+    For each table we emit four projections that together cover both
+    archetypes without forcing the consumer to guess the shape:
+
+        - ``cells``        : 2D string grid (rows × columns) with selection
+                             tokens scrubbed; the canonical raw view.
+        - ``fields``       : per-cell ``{row, column, label, value}`` records
+                             where ``label`` is the cell's printed text and
+                             ``value`` is the cell's handwritten text. Either
+                             may be empty. Empty cells are omitted.
+        - ``key_values``   : ``label -> value`` dict built from any field
+                             that has both halves populated. Most useful on
+                             form-layout tables.
+        - ``row_objects``  : ``[{header: cell_text, ...}, ...]`` — only
+                             populated when row 0 contains ``columnHeader``
+                             cells. Empty data rows are skipped.
+
+    The split between ``label`` and ``value`` is purely geometry-free and
+    document-agnostic: it relies on the OCR's ``isHandwritten`` style spans,
+    so anything the engine sees as handwriting becomes the value, anything
+    printed becomes the label. Pure-printed documents get empty ``value``
+    fields and an empty ``key_values`` dict; the ``cells`` grid is still the
+    full canonical representation.
     """
     out: list[dict] = []
+    full_content: str = analyze_result.get("content", "")
+    hw_ranges = _handwritten_ranges(analyze_result)
+
     for t in analyze_result.get("tables", []):
         rows = t.get("rowCount", 0)
         cols = t.get("columnCount", 0)
         page = (t.get("boundingRegions") or [{}])[0].get("pageNumber")
+
         grid: list[list[str]] = [["" for _ in range(cols)] for _ in range(rows)]
+        fields: list[dict] = []
+        header_row: list[str] = ["" for _ in range(cols)]
+        has_header_row = False
+
         for cell in t.get("cells", []):
             r = cell.get("rowIndex", 0)
             c = cell.get("columnIndex", 0)
-            if r < rows and c < cols:
-                grid[r][c] = cell.get("content", "").strip()
+            kind = cell.get("kind") or "data"
+            label, value = _split_cell_by_handwriting(
+                full_content, cell.get("spans") or [], hw_ranges
+            )
+
+            # Combined text representation for the canonical grid: keep the
+            # printed label first then the handwritten value, so reading the
+            # row top-to-bottom gives the same sequence a human would read.
+            if label and value:
+                cell_text = f"{label} {value}"
+            else:
+                cell_text = label or value
+
+            if 0 <= r < rows and 0 <= c < cols:
+                grid[r][c] = cell_text
+
+            if kind == "columnHeader" and r == 0 and 0 <= c < cols:
+                has_header_row = True
+                # Header text is always the printed portion. If a header
+                # cell is itself handwritten (unusual), we still surface
+                # whatever text is there so the column isn't anonymous.
+                header_row[c] = label or value or ""
+
+            if label or value:
+                fields.append(
+                    {
+                        "row": r,
+                        "column": c,
+                        "label": label,
+                        "value": value,
+                    }
+                )
 
         key_values: dict[str, str] = {}
-        for row in grid:
-            if not row:
-                continue
-            key = row[0].strip()
-            values = [v for v in (cell.strip() for cell in row[1:]) if v]
-            if key and values:
-                key_values[key] = " | ".join(values)
+        for f in fields:
+            if f["label"] and f["value"]:
+                # Last-write-wins on duplicate labels; on real forms label
+                # text is unique within a table.
+                key_values[f["label"]] = f["value"]
 
-        out.append({
-            "page": page,
-            "rows": rows,
-            "columns": cols,
-            "cells": grid,
-            "key_values": key_values,
-        })
+        row_objects: list[dict] = []
+        if has_header_row and any(header_row):
+            for r in range(1, rows):
+                row_dict: dict[str, str] = {}
+                for c in range(cols):
+                    cell_text = grid[r][c]
+                    if not cell_text:
+                        continue
+                    header = header_row[c] or f"col{c}"
+                    row_dict[header] = cell_text
+                if row_dict:
+                    row_objects.append(row_dict)
+
+        out.append(
+            {
+                "page": page,
+                "rows": rows,
+                "columns": cols,
+                "cells": grid,
+                "fields": fields,
+                "key_values": key_values,
+                "row_objects": row_objects,
+            }
+        )
     return out
 
 
