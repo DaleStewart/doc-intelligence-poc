@@ -53,6 +53,11 @@ LAYOUT OUTPUT SHAPE
          ]},
         ...
       ],
+      "key_value_pairs": [                       # only when the layout response
+                                                 # includes the keyValuePairs add-on
+        {"page": 1, "key": "Zip Code", "value": "30334", "confidence": 0.99},
+        ...
+      ],
     }
 
 =============================================================================
@@ -920,6 +925,110 @@ def summarize_tables(analyze_result: dict) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# KEY/VALUE PAIR EXTRACTION (orphan fill-in-the-blank fields)
+# ---------------------------------------------------------------------------
+
+def extract_key_value_pairs(
+    analyze_result: dict,
+    table_key_values: Iterable[dict] | None = None,
+) -> list[dict]:
+    """Surface the optional ``keyValuePairs`` add-on output.
+
+    Document Intelligence's prebuilt-layout model returns a ``keyValuePairs``
+    array when the request enables the ``keyValuePairs`` add-on feature.
+    Each pair is a label and the value the user filled in next to it,
+    which fills the gap our table-based extractor leaves: underline-style
+    fields like ``Name: ____`` that aren't inside a table.
+
+    We aggressively filter the raw output to keep the JSON useful:
+
+    * **Drop selection-mark pairs.** Document Intelligence emits one KVP per
+      checkbox (``Yes -> :selected:``, ``No -> :unselected:``) and per
+      labeled checkbox (``Other -> :selected:``). Those duplicate what
+      :func:`extract_checkbox_answers` and :func:`extract_standalone_checkboxes`
+      already report, so we skip any pair whose value is purely a
+      selection-mark token or whose key is just "Yes"/"No".
+    * **Drop unfilled fields.** Pairs with no value (or whitespace-only value
+      after token scrubbing) are unfilled blanks. They tell us the form's
+      structure but aren't actual extracted data.
+    * **Dedupe against tables.** When the table extractor already surfaced
+      the same ``label -> value`` pair (e.g. "Date of Birth -> 09/10/1995"
+      came out of the page-1 form-grid), we skip the KVP duplicate.
+
+    Generality: this function returns ``[]`` when the response has no
+    ``keyValuePairs`` array (i.e. the add-on wasn't requested or the
+    document had no detectable key/value structure). All filtering is
+    text-pattern based, not document-specific.
+
+    Args:
+        analyze_result: The unwrapped ``analyzeResult`` body.
+        table_key_values: Iterable of per-table ``key_values`` dicts. When
+            provided, identical ``label -> value`` pairs are suppressed.
+
+    Returns:
+        List of ``{"page", "key", "value", "confidence"}`` dicts in the
+        order Document Intelligence emitted them (which is roughly
+        reading order).
+    """
+    raw_pairs = analyze_result.get("keyValuePairs") or []
+    if not raw_pairs:
+        return []
+
+    # Build a set of (key, value) tuples already emitted by tables so we can
+    # dedupe. Lowercased + whitespace-collapsed keys for tolerant matching.
+    table_seen: set[tuple[str, str]] = set()
+    if table_key_values:
+        for kv in table_key_values:
+            for k, v in kv.items():
+                table_seen.add((_norm_kv(k), _norm_kv(v)))
+
+    out: list[dict] = []
+    for pair in raw_pairs:
+        key_obj = pair.get("key") or {}
+        val_obj = pair.get("value") or {}
+        raw_key = (key_obj.get("content") or "").strip()
+        raw_val = (val_obj.get("content") or "").strip()
+
+        # Strip selection-mark tokens before deciding whether the pair is
+        # useful. A value that consists *only* of selection tokens is a
+        # checkbox state, not real data.
+        cleaned_val = _normalize_cell_text(raw_val)
+        cleaned_key = _normalize_cell_text(raw_key)
+
+        if not cleaned_key:
+            continue
+        if not cleaned_val:
+            # Unfilled or selection-only field — skip; checkboxes pass
+            # already covers selection state, and empty blanks aren't data.
+            continue
+        if cleaned_key.lower() in {"yes", "no"}:
+            # Yes/No checkbox pair — already handled by extract_checkbox_answers.
+            continue
+        if (_norm_kv(cleaned_key), _norm_kv(cleaned_val)) in table_seen:
+            continue
+
+        page = None
+        for region in key_obj.get("boundingRegions") or []:
+            page = region.get("pageNumber")
+            break
+
+        out.append(
+            {
+                "page": page,
+                "key": cleaned_key.rstrip(":").strip(),
+                "value": cleaned_val,
+                "confidence": round(pair.get("confidence", 0.0), 2),
+            }
+        )
+    return out
+
+
+def _norm_kv(text: str) -> str:
+    """Lowercase and whitespace-collapse for dedupe comparison."""
+    return " ".join((text or "").lower().split())
+
+
+# ---------------------------------------------------------------------------
 # TOP-LEVEL ENTRY POINTS
 # ---------------------------------------------------------------------------
 
@@ -938,6 +1047,7 @@ def summarize_layout(layout: dict) -> dict:
     # functions decoupled.
     used_per_page = _per_page_used_marks(ar)
 
+    tables = summarize_tables(ar)
     return {
         "model": ar.get("modelId"),
         "api_version": ar.get("apiVersion"),
@@ -945,7 +1055,10 @@ def summarize_layout(layout: dict) -> dict:
         "handwriting": extract_handwriting(ar),
         "checkboxes": checkbox_answers,
         "options": extract_standalone_checkboxes(ar, used_per_page),
-        "tables": summarize_tables(ar),
+        "tables": tables,
+        "key_value_pairs": extract_key_value_pairs(
+            ar, [t.get("key_values", {}) for t in tables]
+        ),
     }
 
 

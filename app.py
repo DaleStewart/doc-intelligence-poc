@@ -37,7 +37,13 @@ def _docintel_client() -> DocumentIntelligenceClient:
 
 def analyze_pdf_bytes(pdf_bytes: bytes, model_id: str = DEFAULT_DOCINTEL_MODEL) -> dict:
     client = _docintel_client()
-    poller = client.begin_analyze_document(model_id=model_id, body=pdf_bytes)
+    # The `keyValuePairs` add-on surfaces label/value pairs that aren't inside
+    # tables (e.g. underline-style "Name: ____" fields). It's only supported by
+    # prebuilt-layout, so skip it for prebuilt-read and any other model.
+    extra: dict = {}
+    if model_id == "prebuilt-layout":
+        extra["features"] = ["keyValuePairs"]
+    poller = client.begin_analyze_document(model_id=model_id, body=pdf_bytes, **extra)
     return poller.result().as_dict()
 
 

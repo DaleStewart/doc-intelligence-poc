@@ -163,6 +163,23 @@
                 </table>
               {% else %}<em>No standalone checkboxes detected.</em>{% endif %}
 
+              <h3>Key / Value Pairs</h3>
+              {% if summary.key_value_pairs %}
+                <table>
+                  <thead><tr><th>Page</th><th>Key</th><th>Value</th><th>Confidence</th></tr></thead>
+                  <tbody>
+                    {% for kv in summary.key_value_pairs %}
+                      <tr>
+                        <td>{{ kv.page }}</td>
+                        <td>{{ kv.key }}</td>
+                        <td>{{ kv.value }}</td>
+                        <td>{{ kv.confidence }}</td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              {% else %}<em>None.</em>{% endif %}
+
               <h3>Tables</h3>
               {% if summary.tables %}
                 {% for t in summary.tables %}
