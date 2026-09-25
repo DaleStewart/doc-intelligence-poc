@@ -1,8 +1,16 @@
-"""Post-process Document Intelligence layout JSON into a human-readable summary.
+"""
+=============================================================================
+=============================================================================
+THIS IS NOT FOR PRODUCTION
+PROOF OF CONCEPT ONLY 
+NEEDS THOROUGH SWE & SECURITY REVIEW BEFORE USE
+=============================================================================
+=============================================================================
 
-=============================================================================
-OVERVIEW
-=============================================================================
+
+Post-process Document Intelligence layout JSON into a human-readable summary.
+-----------------------------------------------------------------------------
+Overview: 
 Document Intelligence (formerly Form Recognizer) returns a large, geometry-rich
 JSON describing every word, line, paragraph, table, selection mark (checkbox),
 and handwriting style detected on a document. This module turns that raw
@@ -213,6 +221,56 @@ def extract_handwriting(analyze_result: dict) -> list[str]:
     return snippets
 
 
+def extract_handwriting_long_form(analyze_result: dict) -> list[dict]:
+    """Return line-level OCR text that includes handwritten content.
+
+    Unlike ``extract_handwriting`` (which returns raw handwritten spans that
+    can be short fragments), this surfaces full OCR lines where handwriting is
+    present so demos can show richer, human-readable pickup values.
+    """
+    hw_ranges = _handwritten_ranges(analyze_result)
+    if not hw_ranges:
+        return []
+
+    out: list[dict] = []
+    seen: set[tuple[int | None, str]] = set()
+
+    for page in analyze_result.get("pages", []):
+        page_num = page.get("pageNumber")
+        for line in page.get("lines", []):
+            text = _normalize_cell_text((line.get("content") or "").strip())
+            if not text:
+                continue
+
+            has_handwriting = False
+            for sp in line.get("spans") or []:
+                ls = sp.get("offset", 0)
+                ll = sp.get("length", 0)
+                if ll <= 0:
+                    continue
+                le = ls + ll
+                for hs, he in hw_ranges:
+                    if he <= ls:
+                        continue
+                    if hs >= le:
+                        break
+                    has_handwriting = True
+                    break
+                if has_handwriting:
+                    break
+
+            if not has_handwriting:
+                continue
+
+            key = (page_num, text)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"page": page_num, "text": text})
+
+    return out
+
+
 def _yes_no_words(page: dict) -> list[dict]:
     """Return every "Yes" or "No" word token on a single page.
 
@@ -371,7 +429,7 @@ def extract_checkbox_answers(analyze_result: dict) -> tuple[list[dict], set[int]
                           recomputed per-page in `_per_page_used_marks` for
                           the standalone pass to skip.
 
-    Why a tuple? The standalone-checkbox pass needs to know which marks have
+    The standalone-checkbox pass needs to know which marks have
     already been claimed so it doesn't double-extract the same checkbox as
     both a Yes/No answer and a bare option.
     """
@@ -1053,6 +1111,7 @@ def summarize_layout(layout: dict) -> dict:
         "api_version": ar.get("apiVersion"),
         "page_count": len(ar.get("pages", [])),
         "handwriting": extract_handwriting(ar),
+        "handwriting_long_form": extract_handwriting_long_form(ar),
         "checkboxes": checkbox_answers,
         "options": extract_standalone_checkboxes(ar, used_per_page),
         "tables": tables,
@@ -1142,6 +1201,7 @@ def summarize_read(layout: dict) -> dict:
         "api_version": ar.get("apiVersion"),
         "page_count": len(ar.get("pages", [])),
         "handwriting": extract_handwriting(ar),
+        "handwriting_long_form": extract_handwriting_long_form(ar),
         "languages": languages,
         "pages": pages_out,
         "full_text": ar.get("content", ""),

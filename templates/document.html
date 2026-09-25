@@ -251,6 +251,27 @@
         {% if result_json %}
           <h3 style="margin-top:22px;font-size:14px;color:#cbd5f5;letter-spacing:.04em;text-transform:uppercase;">Compact JSON</h3>
           <pre>{{ result_json }}</pre>
+
+          {% if summary %}
+            <h3 style="margin-top:22px;font-size:14px;color:#cbd5f5;letter-spacing:.04em;text-transform:uppercase;">Long-form handwritten OCR values</h3>
+            {% if summary.handwriting_long_form %}
+              <div style="background:#f8fafc;border:1px solid var(--border);border-radius:12px;padding:14px;max-height:50vh;overflow:auto;">
+                <table>
+                  <thead><tr><th>Page</th><th>OCR line containing handwriting</th></tr></thead>
+                  <tbody>
+                    {% for item in summary.handwriting_long_form %}
+                      <tr>
+                        <td>{{ item.page }}</td>
+                        <td>{{ item.text }}</td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            {% else %}
+              <em>No long-form handwritten OCR lines detected.</em>
+            {% endif %}
+          {% endif %}
         {% endif %}
       </div>
     </div>
